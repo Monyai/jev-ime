@@ -1,18 +1,30 @@
-name: Rust
+name: Windows Build
 
 on:
-  push:
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 120
 
     steps:
     - uses: actions/checkout@v4
       with:
         submodules: recursive
+
+    - name: Setup Rust
+      shell: pwsh
+      run: |
+        rustup update stable --no-self-update
+        rustup default stable
+        rustup target add x86_64-pc-windows-msvc i686-pc-windows-msvc
+        rustc --version
 
     - name: Cache Rust
       uses: Swatinem/rust-cache@v2
@@ -30,14 +42,51 @@ jobs:
         $modulemapUrl = "https://gist.githubusercontent.com/fkunn1326/ef8be2217082302b291f2b8d4178194a/raw/c424968c250afcd5afa1131aea1329dc0744a7f9/ucrt.modulemap"
         $destination = "$SwiftPath\share\ucrt.modulemap"
         Invoke-WebRequest -Uri $modulemapUrl -OutFile $destination
-    
+
     - name: Install Protoc
       uses: arduino/setup-protoc@v3
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: frontend/package-lock.json
+
+    - name: Install Inno Setup
+      shell: pwsh
+      run: |
+        $iscc = Get-Command iscc -ErrorAction SilentlyContinue
+        if (-not $iscc) {
+          choco install innosetup -y --no-progress
+          $dir = "${env:ProgramFiles(x86)}\Inno Setup 6"
+          if (-not (Test-Path "$dir\ISCC.exe")) { $dir = "$env:ProgramFiles\Inno Setup 6" }
+          Add-Content -Path $env:GITHUB_PATH -Value $dir
+        }
 
     - name: Install cargo-make
-      run: cargo install --force cargo-make
+      shell: pwsh
+      run: |
+        if (-not (Get-Command cargo-make -ErrorAction SilentlyContinue)) {
+          cargo install --locked cargo-make
+        }
 
-    - name: Download prebuilt llama
+    - name: Cache prebuilt llama and zenz model
+      id: cache-llama
+      uses: actions/cache@v4
+      with:
+        path: |
+          llama_cpu
+          llama_cuda
+          llama_vulkan
+          zenz.gguf
+        key: llama-b4846-zenz-v3-small-Q5_K_M
+
+    - name: Download prebuilt llama and zenz model
+      if: steps.cache-llama.outputs.cache-hit != 'true'
+      shell: pwsh
       run: |
         function Download-Extract {
           param (
@@ -51,36 +100,36 @@ jobs:
           Remove-Item $tempZip
         }
 
-        # Create directories
-        $llamaCpuDir = "llama_cpu"
-        $llamaCudaDir = "llama_cuda"
-        $llamaVulkanDir = "llama_vulkan"
-        New-Item -Path $llamaCpuDir, $llamaCudaDir, $llamaVulkanDir -ItemType Directory -Force
+        Download-Extract -url "https://github.com/fkunn1326/llama.cpp/releases/download/b4846/llama-b4846-bin-win-avx-x64.zip" -destFolder "llama_cpu"
+        Download-Extract -url "https://github.com/fkunn1326/llama.cpp/releases/download/b4846/llama-b4846-bin-win-cuda-cu12.4-x64.zip" -destFolder "llama_cuda"
+        Download-Extract -url "https://github.com/fkunn1326/llama.cpp/releases/download/b4846/llama-b4846-bin-win-vulkan-x64.zip" -destFolder "llama_vulkan"
 
-        # Download and extract files
-        Download-Extract -url "https://github.com/fkunn1326/llama.cpp/releases/download/b4846/llama-b4846-bin-win-avx-x64.zip" -destFolder $llamaCpuDir
-        Download-Extract -url "https://github.com/fkunn1326/llama.cpp/releases/download/b4846/llama-b4846-bin-win-cuda-cu12.4-x64.zip" -destFolder $llamaCudaDir
-        Download-Extract -url "https://github.com/fkunn1326/llama.cpp/releases/download/b4846/llama-b4846-bin-win-vulkan-x64.zip" -destFolder $llamaVulkanDir
+        Invoke-WebRequest -Uri "https://huggingface.co/Miwa-Keita/zenz-v3-small-gguf/resolve/main/ggml-model-Q5_K_M.gguf" -OutFile "zenz.gguf"
 
-        # Copy llama.lib to server-swift
-        Copy-Item "$llamaCpuDir\llama.lib" -Destination "server-swift\" -Force
-
-        # Download the zenz model
-        $zenzUrl = "https://huggingface.co/Miwa-Keita/zenz-v3-small-gguf/resolve/main/ggml-model-Q5_K_M.gguf"
-        $zenzDest = "zenz.gguf"
-        Invoke-WebRequest -Uri $zenzUrl -OutFile $zenzDest
+    - name: Copy llama.lib to server-swift
+      shell: pwsh
+      run: Copy-Item "llama_cpu\llama.lib" -Destination "server-swift\" -Force
 
     - name: Install node dependencies
-      run: |
-        cd frontend
-        npm install
+      working-directory: frontend
+      run: npm install
 
     - name: Build
       run: cargo make build --release
 
+    - name: Rename installer with commit SHA
+      id: rename
+      shell: pwsh
+      run: |
+        $sha = "${{ github.event.pull_request.head.sha || github.sha }}".Substring(0, 7)
+        $name = "azookey-setup-$sha.exe"
+        Move-Item "build/azookey-setup.exe" "build/$name"
+        "name=$name" >> $env:GITHUB_OUTPUT
+
+    # archive: false でzipに包まず .exe のままアップロードする（名前はファイル名になる）
     - name: Upload Setup Artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
-        name: azookey-setup
-        path: build/azookey-setup.exe
+        path: build/${{ steps.rename.outputs.name }}
+        archive: false
         if-no-files-found: error
