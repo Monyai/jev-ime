@@ -126,9 +126,10 @@ jobs:
         Move-Item "build/azookey-setup.exe" "build/$name"
         "name=$name" >> $env:GITHUB_OUTPUT
 
+    # archive: false でzipに包まず .exe のままアップロードする（名前はファイル名になる）
     - name: Upload Setup Artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
-        name: ${{ steps.rename.outputs.name }}
         path: build/${{ steps.rename.outputs.name }}
+        archive: false
         if-no-files-found: error
