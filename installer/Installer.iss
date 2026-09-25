@@ -35,6 +35,12 @@ OutputBaseFilename=azookey-setup
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
+; 使用中なら閉じる対象を、インストール先で動くランチャー・変換サーバー・候補ウィンドウに限る。
+; 既定（*.exe,*.dll）だとIMEのDLLを読み込んだ全アプリ（エクスプローラーなど）が対象になる。
+; IMEのDLLは [Files] の restartreplace で再起動時に置き換える。
+CloseApplications=yes
+CloseApplicationsFilter=launcher.exe,azookey-server.exe,ui.exe
+RestartApplications=no
 
 [Languages]
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
@@ -65,28 +71,6 @@ Filename: "schtasks"; \
   Flags: runhidden runascurrentuser
 
 [Code]
-// インストール先で動いているランチャー・変換サーバー・候補ウィンドウを止めて、
-// 実行中のexeやDLLを上書きできるようにする。
-// IMEのDLL自体はアプリに読み込まれているので、[Files] の restartreplace で扱う。
-// また、再起動時に置き換わるファイルにもUWPアプリ用の権限が付くよう、
-// インストール先フォルダーに継承される権限を先に付けておく。
-<event('PrepareToInstall')>
-function StopAzookeyProcesses(var NeedsRestart: Boolean): String;
-var
-  ResultCode: Integer;
-begin
-  // 同名の別アプリ（ui.exe など）を止めないよう、インストール先のexeだけを対象にする
-  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
-    '-NoProfile -ExecutionPolicy Bypass -Command "Get-Process | Where-Object { $_.Path -like ''' +
-      ExpandConstant('{app}') + '\*'' } | Stop-Process -Force"',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-
-  ForceDirectories(ExpandConstant('{app}'));
-  Exec(ExpandConstant('{sys}\icacls.exe'), '"' + ExpandConstant('{app}') + '" /grant "*S-1-15-2-1:(OI)(CI)(RX)"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-
-  Result := '';
-end;
-
 function InitializeSetup: Boolean;
 begin
   ExtractTemporaryFile('Azookey_0.1.0_x64-setup.exe');
@@ -176,10 +160,24 @@ begin
 end;
 
 
+// 使用中で置き換えられなかったファイルは、インストール先に is-XXXXX.tmp として置かれ、
+// 再起動時にリネームされる。IMEのDLLをUWPアプリ（Win11のメモ帳など）から読めるよう、
+// この一時ファイルにも ALL APPLICATION PACKAGES の読み取り・実行権限を付けておく。
+// （[Run] の icacls は置き換え前の古いDLLにしか効かないため）
+procedure GrantAppPackagesToStagedFiles();
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{sys}\icacls.exe'),
+    AddQuotes(ExpandConstant('{app}\is-*.tmp')) + ' /grant *S-1-15-2-1:(RX)',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
+    GrantAppPackagesToStagedFiles();
     CreateVbsFile();
     UpdateTaskXml();
   end;
