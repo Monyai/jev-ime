@@ -35,14 +35,22 @@ OutputBaseFilename=azookey-setup
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
+; 使用中なら閉じる対象を、インストール先で動くランチャー・変換サーバー・候補ウィンドウに限る。
+; 既定（*.exe,*.dll）だとIMEのDLLを読み込んだ全アプリ（エクスプローラーなど）が対象になる。
+; IMEのDLLは [Files] の restartreplace で再起動時に置き換える。
+CloseApplications=yes
+CloseApplicationsFilter=launcher.exe,azookey-server.exe,ui.exe
+RestartApplications=no
 
 [Languages]
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 
 [Files]
-Source: "../build/azookey_windows.dll"; DestDir: "{app}"; DestName: "azookey.dll"; Flags: ignoreversion regserver 64bit
-Source: "../build/x86/azookey_windows.dll"; DestDir: "{app}"; DestName: "azookey32.dll"; Flags: ignoreversion regserver 32bit
-Source: "../build/*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; IMEのDLLはアプリのプロセスに読み込まれていて上書きできないことがあるため、
+; 使用中なら再起動時に置き換える（restartreplace）
+Source: "../build/azookey_windows.dll"; DestDir: "{app}"; DestName: "azookey.dll"; Flags: ignoreversion regserver 64bit restartreplace uninsrestartdelete
+Source: "../build/x86/azookey_windows.dll"; DestDir: "{app}"; DestName: "azookey32.dll"; Flags: ignoreversion regserver 32bit restartreplace uninsrestartdelete
+Source: "../build/*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs restartreplace uninsrestartdelete
 Source: "../target/release/bundle/nsis/Azookey_0.1.0_x64-setup.exe"; Flags: dontcopy noencryption
 Source: "./Azookey Startup.xml"; Flags: dontcopy noencryption
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
@@ -152,10 +160,24 @@ begin
 end;
 
 
+// 使用中で置き換えられなかったファイルは、インストール先に is-XXXXX.tmp として置かれ、
+// 再起動時にリネームされる。IMEのDLLをUWPアプリ（Win11のメモ帳など）から読めるよう、
+// この一時ファイルにも ALL APPLICATION PACKAGES の読み取り・実行権限を付けておく。
+// （[Run] の icacls は置き換え前の古いDLLにしか効かないため）
+procedure GrantAppPackagesToStagedFiles();
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{sys}\icacls.exe'),
+    AddQuotes(ExpandConstant('{app}\is-*.tmp')) + ' /grant *S-1-15-2-1:(RX)',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
+    GrantAppPackagesToStagedFiles();
     CreateVbsFile();
     UpdateTaskXml();
   end;
